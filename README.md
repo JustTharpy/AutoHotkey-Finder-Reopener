@@ -16,7 +16,7 @@ If you know of other software that cause issues, or have improvements please ope
 
 Once programs using AutoHotkey are closed, games like Battlefield 6 should no longer display AutoHotkey-related errors.
 
-![Using the program](process.webp)
+![Using the program](img/process.webp)
 
 ## Building from Source
 This project is built with Visual Studio and MSBuild. To build manually:
