@@ -1,0 +1,48 @@
+name: Build and Release Autohotkey Finder
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild path
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: msbuild "Autohotkey Finder.sln" /p:Configuration=Release /p:Platform=x64
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Autohotkey-Finder-exe
+          path: x64/Release/Autohotkey Finder.exe
+
+  release:
+    needs: build
+    runs-on: windows-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Autohotkey-Finder-exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.sha }}
+          name: Release ${{ github.sha }}
+          body: "For more info on how this works, see https://github.com/TCNOco/AutoHotkey-Finder."
+          files: Autohotkey Finder.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
