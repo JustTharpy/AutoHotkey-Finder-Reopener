@@ -227,6 +227,12 @@ void scanProcess(const PROCESSENTRY32W& pe, DWORD selfPid) {
 
 int wmain() {
     initDefaultConsoleColor();
+    setConsoleColor(FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+    std::wcout << L"Welcome to the TroubleChute AHK Finder.\n";
+    setConsoleColor(g_defaultConsoleAttributes);
+    std::wcout << L"This script is provided AS-IS without warranty of any kind. See https://tc.ht/privacy & https://tc.ht/terms.\n";
+    std::wcout << L"Find the source code at https://github.com/TCNOco/AutoHotkey-Finder\n\n";
+
     setConsoleColor(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
     std::wcout << L"This program scans running processes on the system to detect AutoHotkey executables.\n";
     std::wcout << L"It does not scan process memory; it examines file version info and binaries on disk.\n\n";
