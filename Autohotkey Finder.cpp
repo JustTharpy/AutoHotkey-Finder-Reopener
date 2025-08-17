@@ -15,6 +15,199 @@
 #include <set>
 #include <map>
 #include <conio.h>
+#include <windows.h>
+#include <tlhelp32.h>
+#include <psapi.h>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#include <algorithm>
+
+// ---------------------------------------------------------------------------
+// Globals
+// ---------------------------------------------------------------------------
+static std::vector<std::wstring> g_ClosedPaths;
+static std::atomic<bool> g_Running{ true };
+
+// ---------------------------------------------------------------------------
+// Elevation helper
+// ---------------------------------------------------------------------------
+bool EnsureRunAsAdmin() {
+    BOOL isAdmin = FALSE;
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        TOKEN_ELEVATION elev{};
+        DWORD len = 0;
+        if (GetTokenInformation(token, TokenElevation, &elev, sizeof(elev), &len)) {
+            isAdmin = elev.TokenIsElevated;
+        }
+        CloseHandle(token);
+    }
+    if (isAdmin) return true;
+
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    SHELLEXECUTEINFOW sei{ sizeof(sei) };
+    sei.lpVerb = L"runas";
+    sei.lpFile = exePath;
+    sei.nShow = SW_SHOWDEFAULT;
+    if (ShellExecuteExW(&sei)) return false; // parent exits
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Process helpers
+// ---------------------------------------------------------------------------
+std::wstring PathFromPid(DWORD pid) {
+    std::wstring result;
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, pid);
+    if (!h) return result;
+    wchar_t buf[MAX_PATH];
+    DWORD size = MAX_PATH;
+    if (QueryFullProcessImageNameW(h, 0, buf, &size)) result.assign(buf, size);
+    CloseHandle(h);
+    return result;
+}
+
+bool KillPidAndRemember(DWORD pid) {
+    std::wstring path = PathFromPid(pid);
+    if (path.empty()) return false;
+
+    // Never remember Battlefield itself
+    std::wstring low = path;
+    std::transform(low.begin(), low.end(), low.begin(), ::towlower);
+    if (low.find(L"\\battlefield") != std::wstring::npos || low.find(L"\\bf") != std::wstring::npos) {
+        // skip
+    } else {
+        g_ClosedPaths.push_back(path);
+        std::wcout << L"Remembered & closed: " << path << std::endl;
+    }
+
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (!h) return false;
+    BOOL ok = TerminateProcess(h, 0);
+    CloseHandle(h);
+    return !!ok;
+}
+
+bool BattlefieldRunning() {
+    bool found = false;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            std::wstring name(pe.szExeFile);
+            std::wstring low = name;
+            std::transform(low.begin(), low.end(), low.begin(), ::towlower);
+            if (low.find(L"battlefield") != std::wstring::npos || low.rfind(L"bf", 0) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+void MonitorBattlefieldAndRestore() {
+    bool last = BattlefieldRunning();
+    while (g_Running.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        bool now = BattlefieldRunning();
+        if (last && !now) {
+            std::wcout << L"Battlefield closed. Restarting remembered programs..." << std::endl;
+
+            std::sort(g_ClosedPaths.begin(), g_ClosedPaths.end());
+            g_ClosedPaths.erase(std::unique(g_ClosedPaths.begin(), g_ClosedPaths.end()), g_ClosedPaths.end());
+
+            for (const auto &p : g_ClosedPaths) {
+                std::wstring low = p;
+                std::transform(low.begin(), low.end(), low.begin(), ::towlower);
+                if (low.find(L"\\battlefield") != std::wstring::npos || low.find(L"\\bf") != std::wstring::npos)
+                    continue;
+
+                STARTUPINFOW si{ sizeof(si) };
+                PROCESS_INFORMATION pi{};
+                std::wstring cmd = L"\"" + p + L"\"";
+                wchar_t *mutableCmd = cmd.data();
+                std::wstring dir = p.substr(0, p.find_last_of(L"\\/"));
+                if (CreateProcessW(nullptr, mutableCmd, nullptr, nullptr, FALSE, 0, nullptr,
+                                   dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
+                    CloseHandle(pi.hProcess);
+                    CloseHandle(pi.hThread);
+                    std::wcout << L"Restarted " << p << std::endl;
+                }
+            }
+            g_ClosedPaths.clear();
+        }
+        last = now;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main app: list AHK processes, let user close them
+// ---------------------------------------------------------------------------
+int main() {
+    // Elevation
+    if (!EnsureRunAsAdmin()) return 0;
+
+    // Start BF monitor
+    std::thread bf(MonitorBattlefieldAndRestore);
+
+    std::wcout << L"--- TroubleChute AutoHotkey Finder ---" << std::endl;
+
+    // Enumerate processes
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) {
+        std::wcerr << L"Failed to snapshot processes." << std::endl;
+        return 1;
+    }
+
+    PROCESSENTRY32W pe{ sizeof(pe) };
+    int idx = 0;
+    std::vector<DWORD> pids;
+
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            std::wstring exe(pe.szExeFile);
+            std::wstring low = exe;
+            std::transform(low.begin(), low.end(), low.begin(), ::towlower);
+
+            if (low.find(L"autohotkey") != std::wstring::npos) {
+                std::wcout << idx << L": " << exe << L" (PID " << pe.th32ProcessID << L")" << std::endl;
+                pids.push_back(pe.th32ProcessID);
+                idx++;
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+
+    if (pids.empty()) {
+        std::wcout << L"No AutoHotkey processes found." << std::endl;
+    } else {
+        std::wcout << L"Enter index to close (or -1 to exit): ";
+        int choice;
+        std::wcin >> choice;
+        if (choice >= 0 && choice < (int)pids.size()) {
+            if (KillPidAndRemember(pids[choice]))
+                std::wcout << L"Process closed." << std::endl;
+            else
+                std::wcout << L"Failed to close process." << std::endl;
+        }
+    }
+
+    std::wcout << L"Monitoring Battlefield. Press Ctrl+C to exit." << std::endl;
+    while (true) { std::this_thread::sleep_for(std::chrono::seconds(5)); }
+
+    g_Running.store(false);
+    if (bf.joinable()) bf.join();
+    return 0;
+}
+
 
 // This program scans running processes on the system to detect AutoHotkey executables.
 // It does not scan process memory; it examines file version info and binaries on disk.
